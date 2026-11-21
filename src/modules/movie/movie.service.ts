@@ -1,17 +1,24 @@
 import { RpcStatus } from '@microservice-cinema/common'
 import type {
 	GetMovieRequest,
-	ListMoviesRequest
+	ListMoviesRequest,
+	ListMoviesResponse
 } from '@microservice-cinema/contracts/gen/ts/movie'
 import { Injectable } from '@nestjs/common'
 import { RpcException } from '@nestjs/microservices'
+import { movies } from 'src/infra/database/drizzle/schema/movies.schema'
 
+import { MovieCacheKeys } from './movie.cache.keys'
+import { MovieCacheService } from './movie.cache.service'
 import { MovieMapper } from './movie.mapper'
 import { MovieRepository } from './movie.repository'
 
 @Injectable()
 export class MovieService {
-	public constructor(private readonly movieRepository: MovieRepository) {}
+	public constructor(
+		private readonly movieRepository: MovieRepository,
+		private readonly movieCacheService: MovieCacheService
+	) {}
 
 	public async getAll(data: ListMoviesRequest) {
 		const filter = {
@@ -20,13 +27,33 @@ export class MovieService {
 			limit: data.limit > 0 ? data.limit : undefined
 		}
 
+		const cached =
+			await this.movieCacheService.getAll<ListMoviesResponse['movies']>(
+				filter
+			)
+
+		if (cached) return { movies: cached }
+
 		const movies = await this.movieRepository.findAll(filter)
 		const result = movies.map(MovieMapper.toMovie)
+
+		await this.movieCacheService.setAll(filter, result)
 
 		return { movies: result }
 	}
 
 	public async getOne(data: GetMovieRequest) {
+		const cacheKey = data.id
+			? MovieCacheKeys.byId(data.id)
+			: MovieCacheKeys.bySlug(data.slug)
+
+		const cached =
+			await this.movieCacheService.get<typeof movies.$inferSelect>(
+				cacheKey
+			)
+
+		if (cached) return { movie: cached }
+
 		const movie = data.id
 			? await this.movieRepository.findById(data.id)
 			: await this.movieRepository.findBySlug(data.slug)
@@ -34,10 +61,11 @@ export class MovieService {
 		if (!movie)
 			throw new RpcException({
 				code: RpcStatus.NOT_FOUND,
-				details: 'Movies not found'
+				details: 'Movie not found'
 			})
 
 		const mapped = MovieMapper.toMovie(movie)
+		await this.movieCacheService.set(cacheKey, mapped)
 
 		return { movie: mapped }
 	}
